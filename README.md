@@ -1,5 +1,29 @@
 # 🏫 BÀI LAB 3: CHATBOT VS REACT AGENT - TỪ Ý TƯỞNG ĐẾN THỰC THI
 
+## 🎁 Chủ đề nhóm: GiftSense Agent
+
+Trợ lý nắm bắt tính cách và chọn quà theo hai luồng chính:
+
+1. Đủ giới tính/cách xưng hô, tính cách/phong cách và ngân sách → Agent tự gọi tool, lọc ràng buộc và trả Top 3.
+2. Thiếu thông tin → Agent hỏi đúng trường còn thiếu, lưu hồ sơ qua nhiều lượt rồi tiếp tục tư vấn.
+
+Sở thích, màu sắc, quan hệ, độ thân mật 1–5, dịp tặng, món không thích và đã sở hữu là tín hiệu bổ sung. Câu ngoài phạm vi bị từ chối.
+
+Chạy kiểm thử offline:
+
+```powershell
+$env:LLM_PROVIDER="mock"
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe src\app.py --mode assistant --test all
+```
+
+Chạy giao diện test nhanh:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run ui\streamlit_app.py
+```
+
 ---
 
 ### 💡 1. LỜI NÓI ĐẦU & NỀN TẢNG LÝ THUYẾT (4 CẤP ĐỘ AI HỘI THOẠI)

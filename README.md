@@ -71,3 +71,143 @@ timeline
 
 > 🚀 **BẮT ĐẦU LÀM BÀI**:
 > Vui lòng mở sổ tay thực hành 👉 **[PHAN_CONG_CONG_VIEC.md](file:///c:/Users/Admin/Documents/VinUni/LabCoachVin/LabKeyCoach/Day-3-Lab-Chatbot-vs-react-agent-E402/docs/PHAN_CONG_CONG_VIEC.md)** để xem phân vai và checklist công việc cụ thể cho từng thành viên!
+
+---
+
+### 🖥️ 5. GIAO DIỆN ỨNG DỤNG (UI DESIGN)
+
+Giao diện được xây dựng bằng **Streamlit** (`app_ui.py`), ánh xạ từng phần theo các tiêu chí chấm điểm.
+
+#### 5.1. Backend API Contract
+
+Backend (`src/app.py`) phải trả về **structured JSON** cho frontend:
+
+```json
+// Chatbot Response
+{ "mode": "chatbot", "query": "...", "response": "..." }
+
+// Agent Response  
+{
+  "mode": "agent",
+  "query": "...",
+  "steps": [
+    {
+      "step": 1,
+      "thought": "Cần phân tích INFP trước",
+      "action": "analyze_personality",
+      "action_input": "INFP",
+      "observation": "INFP - Lý tưởng hóa, sáng tạo..."
+    }
+  ],
+  "final_answer": "Nên tặng sổ tay bìa da 250k...",
+  "guardrail_triggered": false,
+  "total_steps": 2
+}
+```
+
+#### 5.2. Layout giao diện
+
+```
+┌─────────────────────────────────────────────────┐
+│  🏫 VINUNI LAB 3 - CHATBOT VS REACT AGENT       │
+│  Chủ đề: Trợ Lý Chọn Quà Tặng                    │
+├─────────────────────────────────────────────────┤
+│                                                   │
+│  ┌─────────── INPUT ──────────────────────────┐  │
+│  │ Dropdown: [Test Case #4 ▼]                  │  │
+│  │ ➜ Bạn thân tôi là INFP, 300k, tặng gì?     │  │
+│  │ ┌─────────────────────────────────┐         │  │
+│  │ │ Hoặc nhập câu hỏi tay...         │         │  │
+│  │ └─────────────────────────────────┘         │  │
+│  │ [🧠 Run Chatbot] [🤖 Run Agent] [⚖️ Compare] │  │
+│  │ [▶️ Run All 5 Tests]                        │  │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─────────── RESULTS ─────────────────────────┐  │
+│  │  ┌─── Chatbot ───┐ ┌─── ReAct Trace ──────┐ │  │
+│  │  │ INFP là người  │ │ Step 1/3              │ │  │
+│  │  │ lý tưởng hóa,  │ │ 🧠 Thought: Cần...    │ │  │
+│  │  │ sáng tạo...    │ │ 🔧 Action: analyze... │ │  │
+│  │  │                │ │ 📊 Obs: INFP - Lý...  │ │  │
+│  │  │ ❌ Ảo giác     │ │                       │ │  │
+│  │  │ (không có giá  │ │ Step 2/3              │ │  │
+│  │  │ thực tế)       │ │ 🧠 Thought: Đã có...  │ │  │
+│  │  └────────────────┘ │ 🔧 Action: suggest... │ │  │
+│  │                     │ 📊 Obs: Sổ tay 250k   │ │  │
+│  │                     │                       │ │  │
+│  │                     │ 🏁 Final Answer: ...   │ │  │
+│  │                     │ 🛡️ Guardrail: False   │ │  │
+│  │                     │ ─────────────────────  │ │  │
+│  │                     │ [📋 Copy Trace Log]    │ │  │
+│  │                     └────────────────────────┘ │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─────────── COMPARISON TABLE ────────────────┐  │
+│  │ ID │ Question    │ Chatbot    │ Agent        │  │
+│  │ 1  │ INFP là gì? │ ✅ Đúng    │ ✅ Đúng      │  │
+│  │ 3  │ Sách+500k   │ ❌ Ảo giác │ ✅ Evidence  │  │
+│  │ 5  │ XQZ-999     │ ❌ Ảo giác │ 🟡 Fallback   │  │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─────────── SCORING MATRIX ──────────────────┐  │
+│  │ Multi-step: 4/5 │ Tool: 5/5 │ Dynamic: 4/5 │  │
+│  │ Long Horizon: 3/5 │ TOTAL: 16/20            │  │
+│  │ ✅ KẾT LUẬN: NÊN DÙNG REACT AGENT           │  │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─────────── TOOL REGISTRY ───────────────────┐  │
+│  │ analyze_personality(type) → str             │  │
+│  │ suggest_gifts(interests, budget, occ) → str │  │
+│  └─────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────┘
+```
+
+#### 5.3. Component mapping với tiêu chí chấm điểm
+
+| Khu vực UI | Component | Tiêu chí |
+|:---|:---|:---:|
+| **Input** | Dropdown test case (load từ `config/test_cases.json`) | #1 - Test Design |
+| **Input** | Ô nhập tay (cho cross-audit) | #4 - Attack & Defense |
+| **Chatbot** | Hiển thị response + label "Không tool" | #2 - Baseline |
+| **ReAct Trace** | Step counter (1/3) + Thought + Action + Observation | #2 - ReAct Loop |
+| **ReAct Trace** | Guardrail warning (đỏ) khi quá MAX_ITERATIONS | #3 - Guardrails |
+| **ReAct Trace** | Nút Copy Trace Log để dán vào `docs/trace_eval.md` | #3 - Observability |
+| **Comparison** | Bảng so sánh Chatbot vs Agent (✅/❌/🟡) | #5 - Hybrid |
+| **Scoring Matrix** | 4 tiêu chí điểm 1-5 + tổng /20 + kết luận | #1 - Agentic Fit |
+| **Tool Registry** | Danh sách tool + input/output/error | #2 - Tools |
+| **Run All** | Chạy batch 5 test cases, xuất bảng tổng hợp | #5 - Evaluation |
+
+#### 5.4. Flow dữ liệu
+
+```
+User click button
+  ↓
+app_ui.py (Streamlit)
+  ↓
+Gọi hàm từ src/app.py:
+  - run_baseline_chatbot(query, provider) → response text
+  - run_react_agent(query, provider) → JSON {steps[], final_answer, guardrail}
+  ↓
+Frontend render từng step:
+  - Step 1: 🧠 Thought → 🔧 Action → 📊 Observation
+  - Step 2: ... 
+  - 🏁 Final Answer
+  - 🛡️ Guardrail status
+```
+
+#### 5.5. File cần tạo/sửa
+
+| File | Hành động | Nội dung |
+|:---|:---|:---|
+| `app_ui.py` | **Tạo mới** | Giao diện Streamlit, gọi backend, render kết quả |
+| `src/app.py` | **Sửa** | Refactor `run_react_agent()` thành vòng lặp LLM thật, parse Action, gọi tool động, trả JSON |
+| `src/tools.py` | **Sửa** | Đổi tool sang chủ đề #3: `analyze_personality`, `suggest_gifts` |
+| `src/prompts.py` | **Sửa** | Cập nhật tool list trong `REACT_SYSTEM_PROMPT` |
+| `requirements.txt` | **Sửa** | Thêm `streamlit` |
+| `docs/hybrid_flowchart.mermaid` | **Tạo mới** | Sơ đồ đường đi Chatbot vs Agent |
+
+#### 5.6. Ghi chú quan trọng
+
+> **Backend phải chạy vòng lặp ReAct thật trước khi giao diện hoạt động đúng.**
+> 
+> Frontend có thể dùng **mock data** để dựng giao diện trước, chờ backend xong thì gắn API thật vào.

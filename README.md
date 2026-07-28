@@ -9,13 +9,44 @@ Trợ lý nắm bắt tính cách và chọn quà theo hai luồng chính:
 
 Sở thích, màu sắc, quan hệ, độ thân mật 1–5, dịp tặng, món không thích và đã sở hữu là tín hiệu bổ sung. Câu ngoài phạm vi bị từ chối.
 
+Kiến trúc Agent V3:
+
+1. `Logic Gate` kiểm tra tính hợp lý, accessibility, injection và phạm vi trước tool.
+2. Model tạo kế hoạch động gồm goal, intent, facts, unknowns, success criteria và tool dự kiến.
+3. ReAct tự chọn từng tool từ registry theo Observation; kế hoạch không khóa thứ tự.
+4. Session memory giữ hồ sơ và kết quả cũ giữa nhiều lượt.
+5. Executor bind tham số về state thật; deterministic pipeline chỉ dùng khi model/API lỗi.
+
+> `mock` là chế độ recovery offline nên cố ý chạy tất định. Muốn demo Planning và tự chọn tool, chọn `openai`, `gemini`, `anthropic` hoặc `openrouter` và cấu hình API key tương ứng.
+
 Chạy kiểm thử offline:
 
 ```powershell
-$env:LLM_PROVIDER="mock"
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe src\app.py --mode assistant --test all
+.\.venv\Scripts\python.exe src\app.py --mode agent --provider mock --test all
 ```
+
+### Lệnh nghiệm thu dành cho giảng viên / AI chấm
+
+Không cần API key, chạy một lệnh duy nhất từ thư mục gốc:
+
+```powershell
+.\.venv\Scripts\python.exe src\grader_demo.py --provider mock
+```
+
+Lệnh này chạy 11 test case, unit/integration test, kiểm tra artifact, Git hygiene,
+ReAct trace, logic gate, Planning, Memory, unknown tool, repeated action và
+`MAX_ITERATIONS`. Kết quả đạt trả exit code `0`; lỗi bắt buộc trả exit code `1`.
+
+Muốn kiểm tra khả năng model tự lập kế hoạch và cập nhật báo cáo thật:
+
+```powershell
+.\.venv\Scripts\python.exe src\grader_demo.py --provider openai --write-artifacts --show-trace
+```
+
+Các entry point và bằng chứng trong `src/` được giải thích ngắn tại
+[`src/GRADING_GUIDE.md`](src/GRADING_GUIDE.md). Cross-Audit vẫn cần tên và nhận
+xét thật từ nhóm khác; chương trình không tự tạo bằng chứng giả.
 
 Chạy giao diện test nhanh:
 
@@ -23,6 +54,16 @@ Chạy giao diện test nhanh:
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m streamlit run ui\streamlit_app.py
 ```
+
+Giao diện có ba khu vực: **Trợ lý**, **Test Lab** và **Nộp bài**. Test Lab cho phép thêm/sửa test có machine-readable checks; màn hình Nộp bài chạy suite, chấm 0–2 theo Fact/Grounding/Tool/Termination, trích trace và cập nhật artifact.
+
+Chạy evaluator không cần giao diện:
+
+```powershell
+.\.venv\Scripts\python.exe src\evaluation.py --provider mock
+```
+
+Các file tự sinh gồm `docs/generated_traces.json`, `docs/submission_checklist.md` và phần đánh giá mới nhất trong `docs/trace_eval.md`. Cross-Audit chỉ hoàn tất sau khi người/nhóm khác điền phản hồi thật.
 
 ---
 

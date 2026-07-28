@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import sys
+from datetime import datetime
 from urllib.parse import quote
 
 import requests
@@ -17,7 +19,19 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from app import AgentResult, GiftAssistantSession
+from evaluation import (
+    CHECKLIST_PATH,
+    CROSS_AUDIT_PATH,
+    TRACE_JSON_PATH,
+    TRACE_REPORT_PATH,
+    audit_submission_files,
+    load_editable_test_cases,
+    run_evaluation_suite,
+    run_unit_tests,
+    save_test_cases,
+)
 from providers import get_llm_provider
+from tools import AVAILABLE_TOOLS
 
 
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 15
@@ -311,6 +325,7 @@ def friendly_trace(event: dict, number: int) -> tuple[str, str]:
         "rank_and_diversify_gifts": ("Xếp hạng và đa dạng hóa", "Chấm điểm, tránh các món quá giống nhau và chọn Top 3."),
         "search_gift_images": ("Tìm ảnh minh họa trên web", "Tìm một ảnh liên quan cho mỗi món trong Top 3 sau khi người dùng đồng ý."),
         "evaluate_gift_suitability": ("Đánh giá độ phù hợp", "Kiểm tra khả năng sử dụng, khả năng tiếp cận và rủi ro trước khi khuyên tặng."),
+        "inspect_gift_idea": ("Kiểm tra ý tưởng quà cụ thể", "Đối chiếu công dụng, dịp tặng và những điều cần xác nhận mà không ép người dùng nhập hồ sơ Top 3."),
     }
     if action in mapping:
         title, description = mapping[action]
@@ -328,6 +343,17 @@ def friendly_trace(event: dict, number: int) -> tuple[str, str]:
         return title, description
 
     event_name = event.get("event")
+    if event_name == "autonomous_plan":
+        plan = event.get("plan") if isinstance(event.get("plan"), dict) else {}
+        intent = plan.get("intent", "chưa xác định")
+        goal = str(plan.get("goal") or "hiểu yêu cầu và chọn bước xử lý phù hợp").strip()
+        unknowns = plan.get("unknowns") if isinstance(plan.get("unknowns"), list) else []
+        missing_note = f" Cần làm rõ {len(unknowns)} thông tin." if unknowns else " Dữ liệu cần thiết đã được nhận diện."
+        guard_note = " Hệ thống đã hiệu chỉnh loại yêu cầu để tránh kết luận nhầm." if plan.get("intent_guard_applied") else ""
+        return (
+            "Lập kế hoạch trước khi hành động",
+            f"Mục tiêu: {goal}. Nhánh xử lý: {intent}.{missing_note}{guard_note} Kế hoạch có thể đổi sau mỗi kết quả.",
+        )
     if event_name == "logic_precheck":
         if event.get("stopped_before_tools"):
             return (
@@ -371,8 +397,9 @@ def submit_message(message: str) -> None:
         return
     st.session_state.messages.append({"role": "user", "content": clean_message})
     with st.status("Đang xử lý yêu cầu...", expanded=True) as live_status:
-        st.write("1. Kiểm tra phạm vi và độ an toàn của câu hỏi")
-        st.write("2. Đọc hồ sơ người nhận và chọn công cụ phù hợp")
+        st.write("1. Kiểm tra logic, phạm vi và độ an toàn")
+        st.write("2. Tự lập kế hoạch từ mục tiêu và memory")
+        st.write("3. Chọn công cụ tiếp theo theo từng kết quả quan sát")
         try:
             result = st.session_state.agent.chat(clean_message, verbose=False)
             live_status.update(label="Đã xử lý xong", state="complete", expanded=False)
@@ -433,15 +460,228 @@ def search_images_from_button() -> None:
         previous_result.trace.extend(result.trace)
 
 
+def render_test_lab(provider_name: str) -> None:
+    st.markdown("# Test Lab")
+    st.caption("Viết test case có kỳ vọng máy đọc được. Khi lưu, hệ thống có thể chạy lại suite và cập nhật báo cáo ngay.")
+    cases = load_editable_test_cases()
+    table_rows = [{
+        "ID": case.get("id"),
+        "Loại": case.get("category", ""),
+        "Câu hỏi": case.get("question", ""),
+        "Stop reason": ", ".join(case.get("checks", {}).get("stop_reasons", [])),
+        "Setup turns": len(case.get("setup_turns", [])),
+    } for case in cases]
+    st.dataframe(table_rows, width="stretch", hide_index=True)
+
+    st.markdown("### Thêm test case")
+    with st.form("add_test_case", clear_on_submit=True):
+        category = st.text_input("Loại test", value="🔴 Edge Case")
+        question = st.text_area("Câu hỏi", placeholder="Nhập câu dùng để tấn công hoặc kiểm tra Agent...")
+        expected = st.text_area("Hành vi kỳ vọng", placeholder="Agent phải làm gì và không được làm gì?")
+        setup_turns_text = st.text_area("Các lượt thiết lập trước đó (mỗi dòng một lượt)", help="Dùng để kiểm tra Memory nhiều lượt.")
+        stop_reasons = st.text_input("Stop reason hợp lệ", value="completed", help="Có thể nhập nhiều giá trị, phân cách bằng dấu phẩy.")
+        required_tools = st.multiselect("Tool bắt buộc", tuple(AVAILABLE_TOOLS))
+        forbidden_tools = st.multiselect("Tool không được gọi", tuple(AVAILABLE_TOOLS))
+        max_tools = st.number_input("Số tool tối đa", min_value=0, max_value=30, value=10)
+        run_after_save = st.checkbox("Tự chạy toàn bộ suite và cập nhật artifact sau khi lưu", value=True)
+        submitted = st.form_submit_button("Lưu test case", type="primary", width="stretch")
+    if submitted:
+        if not question.strip() or not expected.strip():
+            st.error("Cần nhập đầy đủ câu hỏi và hành vi kỳ vọng.")
+        else:
+            next_id = max((int(case.get("id", 0)) for case in cases), default=0) + 1
+            checks: dict = {
+                "stop_reasons": [item.strip() for item in stop_reasons.split(",") if item.strip()],
+                "required_tools": required_tools,
+                "forbidden_tools": forbidden_tools,
+                "max_tools": int(max_tools),
+                "max_steps": 20,
+            }
+            new_case = {
+                "id": next_id,
+                "category": category.strip(),
+                "question": question.strip(),
+                "expected_behavior": expected.strip(),
+                "checks": checks,
+            }
+            setup_turns = [line.strip() for line in setup_turns_text.splitlines() if line.strip()]
+            if setup_turns:
+                new_case["setup_turns"] = setup_turns
+            cases.append(new_case)
+            save_test_cases(cases)
+            if run_after_save:
+                with st.spinner("Đang chạy suite và cập nhật báo cáo..."):
+                    st.session_state.evaluation_report = run_evaluation_suite(provider_name, write_artifacts=True)
+            st.success(f"Đã lưu test #{next_id}" + (" và chạy đánh giá." if run_after_save else "."))
+            st.rerun()
+
+    st.markdown("### Quản lý test hiện có")
+    delete_id = st.selectbox("Chọn test cần xóa", [case["id"] for case in cases], key="delete_test_id")
+    if st.button("Xóa test đã chọn", type="secondary"):
+        save_test_cases([case for case in cases if case["id"] != delete_id])
+        st.success(f"Đã xóa test #{delete_id}.")
+        st.rerun()
+
+    with st.expander("Chỉnh sửa JSON nâng cao"):
+        raw_json = st.text_area("config/test_cases.json", value=json.dumps(cases, ensure_ascii=False, indent=2), height=420)
+        if st.button("Kiểm tra và lưu JSON"):
+            try:
+                parsed = json.loads(raw_json)
+                save_test_cases(parsed)
+            except (ValueError, TypeError, json.JSONDecodeError) as error:
+                st.error(f"JSON chưa hợp lệ: {error}")
+            else:
+                st.success("Đã lưu JSON hợp lệ.")
+                st.rerun()
+
+
+def render_submission_dashboard(provider_name: str) -> None:
+    st.markdown("# Submission Dashboard")
+    st.caption("Một nơi để chạy test, thu trace, cập nhật báo cáo và kiểm tra đủ artifact trước khi nộp.")
+    rubric = [
+        ("Agentic Fit & Test Design", "20%", "Test đa góc cạnh + scoring matrix"),
+        ("ReAct Implementation & Tools", "30%", "Tool contract + Action/Observation thật"),
+        ("Guardrails & Observability", "20%", "MAX_ITERATIONS + failed trace + recovery"),
+        ("Inter-group Attack & Defense", "20%", "Attack nội bộ + xác nhận nhóm chấm chéo"),
+        ("Hybrid Decision Flowchart", "10%", "Chatbot / Agent / recovery rõ ràng"),
+        ("Bonus Autonomous Agent", "+10%", "Planning + goal evaluation + memory"),
+    ]
+    st.dataframe([{"Tiêu chí": a, "Trọng số": b, "Bằng chứng": c} for a, b, c in rubric], width="stretch", hide_index=True)
+
+    run_column, retry_column, unit_column = st.columns(3)
+    with run_column:
+        if st.button("Chạy toàn bộ & cập nhật hồ sơ nộp bài", type="primary", width="stretch"):
+            with st.status("Đang chạy test cases, unit tests và trích trace...", expanded=True) as status:
+                report = run_evaluation_suite(provider_name, write_artifacts=True)
+                st.session_state.evaluation_report = report
+                status.update(label="Đã cập nhật toàn bộ artifact", state="complete", expanded=False)
+    with unit_column:
+        if st.button("Chỉ chạy unit tests", width="stretch"):
+            st.session_state.unit_test_report = run_unit_tests()
+
+    with retry_column:
+        if st.button("Chạy lại các case REVIEW", width="stretch"):
+            current_report = st.session_state.get("evaluation_report")
+            if current_report is None and TRACE_JSON_PATH.exists():
+                current_report = json.loads(TRACE_JSON_PATH.read_text(encoding="utf-8"))
+            failed_ids = [item["id"] for item in (current_report or {}).get("cases", []) if not item["score"]["passed"]]
+            if not failed_ids:
+                st.info("Không có case REVIEW cần chạy lại.")
+            else:
+                with st.spinner(f"Đang chạy lại {len(failed_ids)} case..."):
+                    st.session_state.evaluation_report = run_evaluation_suite(
+                        provider_name,
+                        write_artifacts=True,
+                        case_ids=failed_ids,
+                        merge_existing=True,
+                    )
+                st.success("Đã cập nhật trace cho các case REVIEW.")
+                st.rerun()
+
+    report = st.session_state.get("evaluation_report")
+    if report is None and TRACE_JSON_PATH.exists():
+        try:
+            report = json.loads(TRACE_JSON_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            report = None
+    if report:
+        summary = report["summary"]
+        metric_columns = st.columns(4)
+        metric_columns[0].metric("Test cases đạt", f"{summary['passed_cases']}/{summary['case_count']}")
+        metric_columns[1].metric("Điểm trung bình", f"{summary['average_score']}/8")
+        metric_columns[2].metric("Unit tests", "PASS" if summary["unit_tests_passed"] else "FAIL")
+        metric_columns[3].metric("Artifacts", f"{summary['artifacts_passed']}/{summary['artifacts_total']}")
+        rows = [{
+            "ID": item["id"], "Loại": item["category"], "Stop": item["result"]["stop_reason"],
+            "Tool path": " → ".join(item["actions"]) or "0 tool",
+            "Điểm": f"{item['score']['total']}/8", "Kết quả": "PASS" if item["score"]["passed"] else "REVIEW",
+        } for item in report["cases"]]
+        st.dataframe(rows, width="stretch", hide_index=True)
+        with st.expander("So sánh Chatbot baseline và Agent"):
+            for item in report["cases"]:
+                st.markdown(f"**Test #{item['id']}**")
+                baseline_column, agent_column = st.columns(2)
+                with baseline_column:
+                    st.caption("Chatbot · 0 tool")
+                    st.markdown(item.get("baseline", {}).get("answer", "Chưa có dữ liệu baseline."))
+                with agent_column:
+                    st.caption(f"Agent · {len(item['actions'])} tool action")
+                    st.markdown(item["result"]["final_answer"])
+        with st.expander("Xem trace từng test"):
+            for item in report["cases"]:
+                st.markdown(f"**Test #{item['id']} — {item['question']}**")
+                st.json(item["result"]["trace"], expanded=False)
+
+    unit_report = st.session_state.get("unit_test_report")
+    if unit_report:
+        (st.success if unit_report["success"] else st.error)("Unit tests PASS" if unit_report["success"] else "Unit tests FAIL")
+        st.code(unit_report["output"], language="text")
+
+    st.markdown("### Checklist artifact")
+    artifact_checks = report.get("artifact_checks", []) if report else audit_submission_files()
+    for item in artifact_checks:
+        (st.success if item["passed"] else st.error)(f"{'Đạt' if item['passed'] else 'Thiếu'} · {item['item']} — {item.get('detail', '')}")
+
+    st.markdown("### Tải hồ sơ nộp bài")
+    download_columns = st.columns(4)
+    downloads = (
+        ("Báo cáo trace", TRACE_REPORT_PATH, "text/markdown"),
+        ("Trace JSON", TRACE_JSON_PATH, "application/json"),
+        ("Submission checklist", CHECKLIST_PATH, "text/markdown"),
+        ("Biên bản Cross-Audit", CROSS_AUDIT_PATH, "text/markdown"),
+    )
+    for column, (label, path, mime) in zip(download_columns, downloads):
+        with column:
+            if path.exists():
+                st.download_button(label, data=path.read_bytes(), file_name=path.name, mime=mime, width="stretch")
+            else:
+                st.button(f"{label} · chưa tạo", disabled=True, width="stretch")
+    with st.expander("Điền biên bản Cross-Audit thật"):
+        with st.form("cross_audit_form"):
+            reviewer = st.text_input("Nhóm/người chấm chéo")
+            reviewed_commit = st.text_input("Commit được kiểm tra")
+            attack_feedback = st.text_area("Các câu tấn công đã thử và kết quả")
+            reviewer_feedback = st.text_area("Nhận xét/phản biện của nhóm chấm chéo")
+            save_audit = st.form_submit_button("Lưu biên bản", type="primary")
+        if save_audit:
+            if not reviewer.strip() or not reviewer_feedback.strip():
+                st.error("Cần nhập tên người/nhóm chấm chéo và phản hồi thật.")
+            else:
+                audit_text = (
+                    "# Biên bản Cross-Audit\n\n"
+                    f"- Nhóm/người chấm chéo: {reviewer.strip()}\n"
+                    f"- Thời gian: {datetime.now().astimezone().isoformat(timespec='minutes')}\n"
+                    f"- Commit được kiểm tra: {reviewed_commit.strip() or 'Chưa ghi'}\n\n"
+                    f"## Attack cases đã thử\n\n{attack_feedback.strip() or 'Không ghi chi tiết.'}\n\n"
+                    f"## Phản hồi của nhóm chấm chéo\n\n{reviewer_feedback.strip()}\n"
+                )
+                CROSS_AUDIT_PATH.write_text(audit_text, encoding="utf-8")
+                st.success("Đã lưu biên bản Cross-Audit.")
+    st.info("Không tự đánh dấu hoàn tất Cross-Audit: cần người/nhóm khác kiểm tra và điền phản hồi thật trước khi nộp.")
+
+
 with st.sidebar:
     st.markdown("## GiftSense")
     st.caption("Bảng điều khiển kiểm thử Agent")
     st.success("Backend đang hoạt động")
+    workspace_page = st.radio(
+        "Khu vực làm việc",
+        ("Trợ lý", "Test Lab", "Nộp bài"),
+        captions=("Chat và xem trace", "Viết test cases", "Chạy rubric và xuất artifact"),
+    )
+    provider_options = ("mock", "gemini", "openai", "anthropic", "openrouter")
+    configured_provider = os.getenv("LLM_PROVIDER", "mock").lower().strip()
+    default_provider_index = provider_options.index(configured_provider) if configured_provider in provider_options else 0
     provider_name = st.selectbox(
         "LLM Provider",
-        ("mock", "gemini", "openai", "anthropic", "openrouter"),
+        provider_options,
+        index=default_provider_index,
         help="Mock chạy hoàn toàn offline; các provider khác đọc API key từ .env.",
     )
+    if provider_name == "mock":
+        st.warning("Mock là chế độ dự phòng tất định, không thể tự suy luận hoặc lập kế hoạch như model thật.")
+    else:
+        st.info("Agent mode: model lập kế hoạch và tự chọn tool từ registry động.")
     if "provider_name" not in st.session_state:
         st.session_state.provider_name = provider_name
     if st.session_state.provider_name != provider_name:
@@ -468,6 +708,15 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("Thông tin tối thiểu: giới tính/cách xưng hô · tính cách/phong cách · ngân sách")
+
+
+if workspace_page == "Test Lab":
+    render_test_lab(provider_name)
+    st.stop()
+
+if workspace_page == "Nộp bài":
+    render_submission_dashboard(provider_name)
+    st.stop()
 
 
 st.markdown(

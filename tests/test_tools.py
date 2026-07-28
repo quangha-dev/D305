@@ -15,6 +15,7 @@ from tools import (
     classify_gift_scope,
     evaluate_gift_suitability,
     extract_recipient_profile,
+    inspect_gift_idea,
     rank_and_diversify_gifts,
     search_gift_catalog,
     search_gift_images,
@@ -22,6 +23,11 @@ from tools import (
 
 
 class GiftToolsTests(unittest.TestCase):
+    def test_color_is_not_extracted_from_a_larger_word(self):
+        result = extract_recipient_profile("Bạn nữ hướng nội, ngân sách tối đa 500k")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["profile"]["favorite_colors"], [])
+
     def test_extracts_minimum_and_optional_profile(self):
         result = extract_recipient_profile(
             "Tìm quà sinh nhật cho bạn nữ hướng nội, thích đọc sách, màu xanh, "
@@ -105,6 +111,19 @@ class GiftToolsTests(unittest.TestCase):
         self.assertFalse(result["suitable"])
         self.assertIn("không mang lại công dụng trực tiếp", result["reason"])
         self.assertGreaterEqual(len(result["alternatives"]), 2)
+
+    def test_single_gift_context_does_not_require_top3_profile(self):
+        result = inspect_gift_idea("Tặng đèn đọc sách cho một bạn nữ nhân dịp sinh nhật có được không?")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "reasonable_with_conditions")
+        self.assertEqual(result["gift"]["name"], "Đèn đọc sách mini")
+        self.assertTrue(any("sinh nhật" in item for item in result["positive_signals"]))
+        self.assertTrue(any("đọc sách" in item for item in result["questions_to_verify"]))
+
+    def test_single_gift_context_blocks_accessibility_conflict(self):
+        result = inspect_gift_idea("Tặng đèn đọc sách cho người mù")
+        self.assertEqual(result["status"], "conflict")
+        self.assertFalse(result["suitable"])
 
     def test_accessibility_statement_routes_to_suitability(self):
         scope = classify_gift_scope("Tôi muốn tặng đèn đọc sách cho người mù")

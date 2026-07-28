@@ -1,18 +1,17 @@
 flowchart TD
-    U["Người dùng gửi tin nhắn"] --> S{"Scope guard"}
-    S -- "Ngoài tính cách/quà tặng" --> R["Từ chối lịch sự"]
-    S -- "Kiến thức tính cách đơn giản" --> B["Chatbot baseline<br/>1 LLM call, 0 tool"]
-    S -- "Tư vấn quà / phản hồi" --> E["Trích xuất hoặc cập nhật hồ sơ"]
-    E --> V{"Đủ giới tính + tính cách/phong cách + ngân sách dương?"}
-    V -- "Chưa" --> Q["Hỏi đúng trường còn thiếu"]
-    Q --> U
-    V -- "Đủ" --> A["ReAct Agent đọc registry và tự chọn tool"]
-    A --> T["Action → Tool thật → Observation"]
-    T --> G{"Đã có ranking grounded?"}
-    G -- "Chưa, còn budget vòng lặp" --> A
-    G -- "Có" --> O["Top 3: giá + điểm + ý nghĩa + lý do + lưu ý"]
-    A -- "Parse/tool/repeated-action error" --> F["Agent V2 grounded fallback"]
-    F --> T
-    O --> C{"Người dùng phản hồi?"}
-    C -- "Có" --> E
-    C -- "Không" --> X["Kết thúc"]
+    U["Người dùng gửi tin nhắn"] --> L{"Logic gate trước tool"}
+    L -- "Xung đột trực tiếp<br/>vd. đèn đọc sách + người mù" --> X["Giải thích + phương án tiếp cận<br/>0 tool call"]
+    L -- "Injection / ngoài phạm vi" --> R["Từ chối an toàn"]
+    L -- "Hợp lý" --> P["Model Planning<br/>Goal + Intent + Known + Unknown + Success criteria"]
+    P --> D{"Intent do model xác định"}
+    D -- "Kiến thức đơn giản" --> B["Chatbot path<br/>không tool"]
+    D -- "Một món cụ thể" --> I["inspect_gift_idea / suitability<br/>không yêu cầu hồ sơ Top 3"]
+    D -- "Tìm Top 3" --> A["ReAct đọc registry + memory<br/>tự chọn Action tiếp theo"]
+    D -- "Feedback" --> M["Cập nhật memory phần thay đổi"]
+    M --> A
+    A --> T["Action → Executor → Observation thật"]
+    T --> E{"Đã đạt success criteria?"}
+    E -- "Chưa và còn iteration" --> A
+    E -- "Đủ ranking grounded" --> O["Top 3 + giá + điểm + ý nghĩa + lưu ý"]
+    A -- "Lỗi provider / parser / repeated action" --> F["Recovery có trace<br/>deterministic offline tools"]
+    F --> O

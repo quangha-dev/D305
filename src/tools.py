@@ -113,6 +113,13 @@ def _unique(values: list[Any]) -> list[Any]:
     return result
 
 
+def _contains_term(folded_text: str, term: str) -> bool:
+    """Match a normalized term on word boundaries, never inside another word."""
+
+    normalized = _fold(term).strip()
+    return bool(normalized and re.search(rf"(?<!\w){re.escape(normalized)}(?!\w)", folded_text))
+
+
 def _merge_profile(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     profile = copy.deepcopy(PROFILE_DEFAULTS)
     profile.update(copy.deepcopy(base or {}))
@@ -186,7 +193,7 @@ def classify_gift_scope(user_text: str, has_active_profile: bool = False) -> dic
     recommendation_terms = ("qua", "tang", "ngan sach", "budget", "khong thich", "da co")
     suitability_patterns = (
         "co the tang", "co nen tang", "tang duoc khong", "phu hop khong", "co hop khong",
-        "nen chon", "mon nay co",
+        "co duoc khong", "nen chon", "mon nay co",
     )
     accessibility_terms = ("nguoi mu", "khiem thi", "khong nhin thay", "nguoi diec", "khiem thinh", "khuyet tat")
     concrete_gift_terms = (
@@ -198,8 +205,18 @@ def classify_gift_scope(user_text: str, has_active_profile: bool = False) -> dic
         and any(term in text for term in concrete_gift_terms)
         and "tang" in text
     )
+    explicit_recommendation = any(
+        pattern in text for pattern in ("tim qua", "goi y qua", "tu van qua", "top 3", "ngan sach", "budget")
+    )
+    knowledge_question = (
+        ("tinh cach" in text or "mbti" in text)
+        and any(pattern in text for pattern in ("la gi", "thuong", "phong cach", "y nghia", "nhu the nao"))
+        and not explicit_recommendation
+    )
     if any(pattern in text for pattern in suitability_patterns) or accessibility_suitability:
         intent = "gift_suitability"
+    elif knowledge_question:
+        intent = "personality_knowledge"
     elif has_active_profile and (short_follow_up or any(term in text for term in recommendation_terms)):
         intent = "profile_update"
     elif any(term in text for term in recommendation_terms):
@@ -245,7 +262,7 @@ def extract_recipient_profile(
         "preferred_styles": ["thực tế", "tình cảm", "độc đáo", "sáng tạo", "dùng hằng ngày", "trải nghiệm", "tối giản", "sang trọng"],
     }
     for field, values in vocabularies.items():
-        matches = [value for value in values if _fold(value) in folded]
+        matches = [value for value in values if _contains_term(folded, value)]
         if matches:
             patch[field] = matches
 
@@ -305,7 +322,12 @@ def extract_recipient_profile(
     profile = _merge_profile(current_profile or {}, patch)
     if profile.get("budget_max") is not None:
         profile["budget_ambiguous"] = ""
-    return {"success": True, "profile": profile, "updated_fields": sorted(patch)}
+    return {
+        "success": True,
+        "profile": profile,
+        "updated_fields": sorted(patch),
+        "assessment": assess_profile(profile),
+    }
 
 
 def assess_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -496,6 +518,7 @@ def update_profile_from_feedback(
     return {
         "success": True,
         "profile": extraction["profile"],
+        "assessment": extraction.get("assessment", assess_profile(extraction["profile"])),
         "previous_recommendation_ids": [item.get("id") for item in previous_recommendations if isinstance(item, dict)],
         "updated_fields": extraction.get("updated_fields", []),
     }
@@ -616,6 +639,87 @@ def evaluate_gift_suitability(user_text: str) -> dict[str, Any]:
     }
 
 
+def inspect_gift_idea(user_text: str) -> dict[str, Any]:
+    """Inspect one concrete gift idea and return usage/occasion context for the Agent.
+
+    Use this for questions such as "tặng đèn đọc sách cho bạn nữ sinh nhật có
+    được không?". It does not require the minimum profile used by Top-3 search.
+    Direct accessibility or safety conflicts take precedence over soft matches.
+    """
+
+    if not isinstance(user_text, str) or not user_text.strip():
+        return {"success": False, "error": "Cần mô tả ý tưởng quà và người nhận."}
+    folded = _fold(user_text)
+    conflict = _find_gift_logic_conflict(folded)
+    if conflict:
+        return {"success": True, "status": "conflict", **conflict}
+
+    matched: dict[str, Any] | None = None
+    for gift in GIFT_DATABASE:
+        name = _fold(gift["name"])
+        significant_tokens = [token for token in name.split() if len(token) >= 3 and token not in {"mini", "theo", "cua"}]
+        if name in folded or (len(significant_tokens) >= 2 and all(token in folded for token in significant_tokens[:2])):
+            matched = copy.deepcopy(gift)
+            break
+    if matched is None:
+        return {
+            "success": True,
+            "status": "unknown_gift",
+            "verdict": "Có thể cân nhắc nhưng chưa đủ căn cứ",
+            "reason": "Ý tưởng này chưa có trong catalog tham chiếu nên cần xác minh công dụng và khả năng sử dụng thực tế.",
+            "questions_to_verify": [
+                "Người nhận có thực sự sử dụng hoặc mong muốn món này không?",
+                "Món quà có yêu cầu sức khỏe, kích thước hoặc thiết bị tương thích nào không?",
+            ],
+        }
+
+    detected_occasions = [occasion for occasion in matched["occasion_tags"] if _fold(occasion) in folded]
+    interest_signals = [
+        interest
+        for interest in matched["interest_tags"]
+        if any(
+            marker in folded
+            for marker in (
+                f"thich {_fold(interest)}",
+                f"thuong {_fold(interest)}",
+                f"dam me {_fold(interest)}",
+                f"so thich {_fold(interest)}",
+            )
+        )
+    ]
+    suitable_occasion = bool(detected_occasions)
+    questions: list[str] = []
+    if not interest_signals:
+        primary_interest = matched["interest_tags"][0] if matched["interest_tags"] else "công dụng của món quà"
+        questions.append(f"Người nhận có hứng thú với {primary_interest} hoặc thường dùng món tương tự không?")
+    questions.append("Người nhận đã có món tương tự hoặc có nhu cầu tiếp cận/an toàn đặc biệt không?")
+    positives = []
+    if suitable_occasion:
+        positives.append(f"Phù hợp dịp {detected_occasions[0]}")
+    if interest_signals:
+        positives.append("Khớp tín hiệu sở thích: " + ", ".join(interest_signals))
+    if not positives:
+        positives.append("Đây là món quà có công dụng rõ ràng nếu đúng nhu cầu người nhận")
+    return {
+        "success": True,
+        "status": "reasonable_with_conditions",
+        "verdict": "Có thể tặng nếu phù hợp nhu cầu thực tế",
+        "gift": {
+            "id": matched["id"],
+            "name": matched["name"],
+            "reference_price": matched["price"],
+            "category": matched["category"],
+            "intended_interests": matched["interest_tags"],
+            "suitable_occasions": matched["occasion_tags"],
+            "meaning": matched["meaning"],
+        },
+        "positive_signals": positives,
+        "reason": "Giới tính không tự quyết định độ phù hợp; công dụng, sở thích và khả năng sử dụng mới là tín hiệu chính.",
+        "questions_to_verify": questions,
+        "check_before_buying": matched["caution"],
+    }
+
+
 def search_gift_images(
     gifts: list[dict[str, Any]],
     max_images: int = 3,
@@ -707,5 +811,6 @@ AVAILABLE_TOOLS = {
     "rank_and_diversify_gifts": rank_and_diversify_gifts,
     "update_profile_from_feedback": update_profile_from_feedback,
     "evaluate_gift_suitability": evaluate_gift_suitability,
+    "inspect_gift_idea": inspect_gift_idea,
     "search_gift_images": search_gift_images,
 }
